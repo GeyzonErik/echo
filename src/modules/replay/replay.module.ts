@@ -1,0 +1,17 @@
+import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { ReplayController } from './replay.controller';
+import { ReplayService, REPLAY_QUEUE } from './replay.service';
+import { ReplayRepository } from './replay.repository';
+import { PartitionerModule } from '../partitioner/partitioner.module';
+
+@Module({
+  imports: [
+    BullModule.registerQueue({ name: REPLAY_QUEUE }),
+    PartitionerModule,
+  ],
+  controllers: [ReplayController],
+  providers: [ReplayService, ReplayRepository],
+  exports: [ReplayService, ReplayRepository],
+})
+export class ReplayModule {}

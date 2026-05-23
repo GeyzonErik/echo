@@ -4,6 +4,7 @@ import configuration from './shared/config/configuration';
 import { BullModule } from '@nestjs/bullmq';
 import { DatabaseModule } from './shared/database/database.module';
 import { RedisModule } from './shared/redis/redis.module';
+import { ReplayModule } from './modules/replay/replay.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { RedisModule } from './shared/redis/redis.module';
     }),
     DatabaseModule,
     RedisModule,
+    ReplayModule,
   ],
 })
 export class AppModule {}
