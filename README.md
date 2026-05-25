@@ -1,98 +1,224 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Echo
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+**Replay & Backfill Infrastructure for Event-Driven Systems**
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
-
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+Echo is a replay engine for distributed pipelines. Send one API request and it partitions the work, runs parallel workers, persists checkpoints, and recovers automatically from failures — without scripts, without manual coordination.
 
 ```bash
-$ pnpm install
+POST /replay
+{
+  "stream": "orders",
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-01-31T23:59:59Z",
+  "parallelism": 20
+}
 ```
 
-## Compile and run the project
+---
+
+## The problem
+
+Every event-driven system eventually needs to reprocess historical data. A business rule changed. A new service needs to be backfilled. A pipeline crashed halfway through two million events.
+
+The typical solution: an engineer writes a script at 11pm. No checkpointing. No retry. No visibility. If it crashes, you start over.
+
+Echo is the infrastructure that should have existed.
+
+---
+
+## How it works
+
+```
+POST /replay
+     │
+     ▼
+PartitionerService
+splits the time range into N equal chunks
+     │
+     ▼
+BullMQ Queue
+[partition-0] [partition-1] ... [partition-N]
+     │
+     ▼  (parallel workers)
+ReplayWorker
+reads events in batches · processes · saves checkpoint
+     │
+     ├── failure → DeadLetterQueue (payload preserved)
+     └── success → Checkpoint updated (Redis + PostgreSQL)
+```
+
+Each partition runs independently. Workers checkpoint progress after every batch. If the process crashes mid-replay, it resumes from the last saved cursor — not from the beginning.
+
+---
+
+## Benchmarks
+
+Tested locally against 50,192 events (6-month range, `orders` stream):
+
+| parallelism | duration | throughput       |
+| ----------- | -------- | ---------------- |
+| 1           | 3,248ms  | ~15,400 events/s |
+| 20          | 880ms    | ~57,000 events/s |
+
+**3.7x faster** with parallel partitioning on the same machine and the same dataset.
+
+> Hardware: local dev machine · PostgreSQL 16 + Redis 7 via Docker
+
+---
+
+## Key features
+
+**Checkpoint + Resume** — progress is persisted to Redis (fast) and PostgreSQL (durable) after every batch. Kill the process mid-replay, restart, and it picks up exactly where it stopped.
+
+**Dead-letter queue** — events that fail after all retries are written to a `dead_letters` table with the original payload and error message. Nothing is silently dropped.
+
+**Automatic partitioning** — the engine divides any time range into N equal slices. Each partition is an independent BullMQ job with its own cursor and checkpoint.
+
+**Deterministic execution** — the same replay request with the same parameters produces the same result. Cursor-based pagination (`ORDER BY id`) guarantees consistent ordering across restarts.
+
+**Cancellation** — `POST /replay/:id/cancel` signals all active workers to stop gracefully at the next batch boundary.
+
+---
+
+## API
+
+### Create a replay job
+
+```
+POST /replay
+```
+
+```json
+{
+  "stream": "orders",
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-01-31T23:59:59Z",
+  "parallelism": 4
+}
+```
+
+Response `202 Accepted`:
+
+```json
+{
+  "id": "uuid",
+  "stream": "orders",
+  "status": "pending",
+  "parallelism": 4,
+  "total_events": null,
+  "processed": 0,
+  "created_at": "2026-01-01T00:00:00Z"
+}
+```
+
+### Get replay status
+
+```
+GET /replay/:id
+```
+
+```json
+{
+  "id": "uuid",
+  "status": "completed",
+  "total_events": 24958,
+  "processed": 24958,
+  "progress_pct": 100,
+  "partitions": [
+    {
+      "partition_index": 0,
+      "status": "completed",
+      "processed": 6245,
+      "last_event_id": "uuid"
+    }
+  ]
+}
+```
+
+### Dead-letter inspection
+
+```
+GET /replay/:id/dead-letters
+```
+
+Returns up to 100 failed events with their original payload and error message.
+
+### Cancel
+
+```
+POST /replay/:id/cancel
+```
+
+Signals active workers to stop at the next batch boundary. Returns `204 No Content`.
+
+---
+
+## Quick start
+
+**Requirements:** Node.js 20+, pnpm, Docker
 
 ```bash
-# development
-$ pnpm run start
+git clone https://github.com/GeyzonErik/echo.git
+cd echo
 
-# watch mode
-$ pnpm run start:dev
+cp .env.example .env
 
-# production mode
-$ pnpm run start:prod
+docker compose up -d
+
+pnpm install
+
+# Run migrations
+docker exec -i echo_postgres psql -U echo -d echo < migrations/schema.sql
+
+# Seed 100K events
+pnpm seed
+
+# Start
+pnpm start:dev
 ```
 
-## Run tests
+The API is available at `http://localhost:3000`.
+Bull Board (queue dashboard) is available at `http://localhost:3000/queues`.
 
-```bash
-# unit tests
-$ pnpm run test
+---
 
-# e2e tests
-$ pnpm run test:e2e
+## Schema
 
-# test coverage
-$ pnpm run test:cov
+```sql
+events         -- event source (stream, payload, occurred_at)
+replay_jobs    -- one row per POST /replay request
+checkpoints    -- one row per partition, tracks cursor and progress
+dead_letters   -- failed events with payload and error preserved
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Stack
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Layer              | Technology                            |
+| ------------------ | ------------------------------------- |
+| Framework          | NestJS + TypeScript                   |
+| Queue              | BullMQ                                |
+| Cache / checkpoint | Redis (ioredis)                       |
+| Database           | PostgreSQL (postgres driver — no ORM) |
+| Infrastructure     | Docker Compose                        |
+| Package manager    | pnpm                                  |
 
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
-```
+No ORM. Raw SQL with the `postgres` driver for predictable query behavior and explicit control over indexes.
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Resources
+## Project context
 
-Check out a few resources that may come in handy when working with NestJS:
+Echo formalizes patterns from production work: an ETL pipeline processing 21K+ blockchain events per day and parallel synchronization of 51 pools using GCP Cloud Tasks. The checkpoint-resume pattern, dead-letter handling, and cursor-based pagination are direct extractions from that experience.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+---
 
-## Support
+## Roadmap
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+| V2  | Real connectors (Kafka, Redis Streams, SQS, RabbitMQ) |
+| --- | ----------------------------------------------------- |
+| V2  | Webhook notifications on job completion               |
+| V2  | Rate limiting per replay job                          |
+| V2  | Multi-stream replay in a single request               |
+| V3  | SDK — embed Echo directly in your NestJS application  |
