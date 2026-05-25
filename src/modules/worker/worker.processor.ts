@@ -112,10 +112,6 @@ export class ReplayWorker extends WorkerHost {
    */
   protected async handleEvent(event: RawEvent): Promise<void> {
     // No-op for MVP — simulates processing without overhead
-    // Simulated random failure to demonstrate dead letter handling (5% failure rate)
-    if (Math.random() < 0.05) {
-      throw new Error(`Simulated failure for event ${event.id}`);
-    }
     await Promise.resolve();
   }
 
