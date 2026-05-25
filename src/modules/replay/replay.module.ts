@@ -5,12 +5,14 @@ import { ReplayService, REPLAY_QUEUE } from './replay.service';
 import { ReplayRepository } from './replay.repository';
 import { PartitionerModule } from '../partitioner/partitioner.module';
 import { WorkerModule } from '../worker/worker.module';
+import { DeadLetterModule } from '../dead-letter/dead-letter.module';
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: REPLAY_QUEUE }),
     PartitionerModule,
     WorkerModule,
+    DeadLetterModule,
   ],
   controllers: [ReplayController],
   providers: [ReplayService, ReplayRepository],
